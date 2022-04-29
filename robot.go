@@ -1,18 +1,22 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 
 	"github.com/opensourceways/community-robot-lib/config"
-	"github.com/opensourceways/community-robot-lib/robot-gitee-framework"
-	sdk "github.com/opensourceways/go-gitee/gitee"
+	framework "github.com/opensourceways/community-robot-lib/robot-gitee-framework"
+	"github.com/opensourceways/go-gitee/gitee"
 	"github.com/sirupsen/logrus"
 )
 
-// TODO: set botName
-const botName = ""
+const botName = "version-freezer"
 
 type iClient interface {
+	AddPRLabel(org, repo string, number int32, label string) error
+	CreatePRComment(org, repo string, number int32, comment string) error
+	GetPathContent(org, repo, path, ref string) (gitee.Content, error)
+	RemovePRLabel(org, repo string, number int32, label string) error
+	RemovePRLabels(org, repo string, number int32, label []string) error
 }
 
 func newRobot(cli iClient) *robot {
@@ -27,36 +31,50 @@ func (bot *robot) NewConfig() config.Config {
 	return &configuration{}
 }
 
-func (bot *robot) getConfig(cfg config.Config) (*configuration, error) {
-	if c, ok := cfg.(*configuration); ok {
-		return c, nil
+func (bot *robot) getConfig(cfg config.Config, org, repo string) (*botConfig, error) {
+	c, ok := cfg.(*configuration)
+	if !ok {
+		return nil, fmt.Errorf("can't convert to configuration")
 	}
-	return nil, errors.New("can't convert to configuration")
+
+	if bc := c.configFor(org, repo); bc != nil {
+		return bc, nil
+	}
+
+	return nil, fmt.Errorf("no config for this repo:%s/%s", org, repo)
 }
 
 func (bot *robot) RegisterEventHandler(f framework.HandlerRegitster) {
-	f.RegisterIssueHandler(bot.handleIssueEvent)
 	f.RegisterPullRequestHandler(bot.handlePREvent)
 	f.RegisterNoteEventHandler(bot.handleNoteEvent)
-	f.RegisterPushEventHandler(bot.handlePushEvent)
 }
 
-func (bot *robot) handlePREvent(e *sdk.PullRequestEvent, c config.Config, log *logrus.Entry) error {
-	// TODO: if it doesn't needd to hand PR event, delete this function.
-	return nil
+func (bot *robot) handlePREvent(e *gitee.PullRequestEvent, c config.Config, log *logrus.Entry) error {
+	org, repo := e.GetOrgRepo()
+
+	cfg, err := bot.getConfig(c, org, repo)
+	if err != nil {
+		return err
+	}
+
+	if action := e.GetAction(); action != gitee.ActionOpen && action != "update" {
+		return nil
+	}
+
+	return bot.handleCheckVersionFreeze(org, repo, e.GetPullRequest(), cfg, log)
 }
 
-func (bot *robot) handleIssueEvent(e *sdk.IssueEvent, c config.Config, log *logrus.Entry) error {
-	// TODO: if it doesn't needd to hand Issue event, delete this function.
-	return nil
-}
+func (bot *robot) handleNoteEvent(e *gitee.NoteEvent, c config.Config, log *logrus.Entry) error {
+	if !e.IsPullRequest() || !e.IsPROpen() {
+		return nil
+	}
 
-func (bot *robot) handlePushEvent(e *sdk.PushEvent, c config.Config, log *logrus.Entry) error {
-	// TODO: if it doesn't needd to hand Push event, delete this function.
-	return nil
-}
+	org, repo := e.GetOrgRepo()
 
-func (bot *robot) handleNoteEvent(e *sdk.NoteEvent, c config.Config, log *logrus.Entry) error {
-	// TODO: if it doesn't needd to hand Note event, delete this function.
-	return nil
+	cfg, err := bot.getConfig(c, org, repo)
+	if err != nil {
+		return err
+	}
+
+	return bot.handleParseCmd(e, cfg, log)
 }
